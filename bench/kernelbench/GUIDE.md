@@ -66,9 +66,11 @@ SPEEDUP: 2.7197x
 
 - **COMPILED** — whether the solution compiled successfully
 - **CORRECT** — whether outputs match the reference (within precision tolerance)
-- **RUNTIME** — solution kernel mean execution time in milliseconds
-- **REF_RUNTIME** — reference kernel mean execution time in milliseconds
+- **RUNTIME** — solution kernel **median** execution time in milliseconds (over the recorded trials; mean/std/min/max remain in the printed stats)
+- **REF_RUNTIME** — reference kernel **median** execution time in milliseconds
 - **SPEEDUP** — `REF_RUNTIME / RUNTIME`
+- **DEVIATION** — only when `CORRECT: False`: how far off the output was (`max_abs=… avg_abs=… failed_trials=…`, or the failure kind), so a numerics-tolerance near miss and a gross logic error are distinguishable at a glance
+- **MUTATION_SENTINEL** — `PASS` / `FAIL …`, printed by the performance phase: after timing, the reused input tensors are re-randomized **in place** and the solution must still track the reference on the new values. `FAIL` forces `CORRECT: False` — a cached or replayed output cannot follow a mutated input, so the timed result did not measure computation
 
 Under `--no-ref`, `REF_RUNTIME` and `SPEEDUP` print as `-1` (reference not timed); `COMPILED`, `CORRECT`, and `RUNTIME` are unaffected.
 
@@ -85,7 +87,7 @@ Exit code: `0` = correct, `1` = incorrect or failed.
 | `--precision` | `float32` | `float32`, `float16`, `bfloat16` |
 | `--backend` | auto-detected | `cuda`, `triton`, `tilelang`, `cute`, `hip` (auto-detected from solution source; pass explicitly to override — see below) |
 | `--num-correct-trials` | `5` | Number of correctness check iterations |
-| `--num-perf-trials` | `100` | Number of performance timing iterations |
+| `--num-perf-trials` | `50` | Number of recorded performance timing iterations (first trial discarded, 10 untimed warmups; the reported statistic is the median) |
 | `--no-ref` | off | Skip reference timing: emit `COMPILED`/`CORRECT`/`RUNTIME` but set `REF_RUNTIME`/`SPEEDUP` to -1 (and skip the reward-hack flag, which needs the ratio). Fast iteration on an expensive reference — rank by the solution's own `RUNTIME`. See "Fast iteration" below. |
 | `--verbose` | off | Print detailed debug info |
 | `--self-test` | off | Run source transformation self-test and exit |

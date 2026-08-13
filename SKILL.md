@@ -119,7 +119,7 @@ Separate the per-iteration **signal** from the final **verdict**:
 
 **Whose eval is it determines what you may touch:**
 
-- **Default bench** (`bench/kernelbench/bench.py` — the skill owns it): pull levers freely, cheapest-and-safest first — `--no-ref` (skip reference timing; `REF_RUNTIME`/`SPEEDUP` → -1, `COMPILED`/`CORRECT`/`RUNTIME` unaffected) → trim `--num-perf-trials` (e.g. 100→20; latency noise only) → trim `--num-correct-trials` (higher risk: weakens the fresh-input anti-cheat and still runs the ref once per trial, so keep ≥1 in the loop, full at the gate).
+- **Default bench** (`bench/kernelbench/bench.py` — the skill owns it): pull levers freely, cheapest-and-safest first — `--no-ref` (skip reference timing; `REF_RUNTIME`/`SPEEDUP` → -1, `COMPILED`/`CORRECT`/`RUNTIME` unaffected) → trim `--num-perf-trials` (e.g. 50→20; latency noise only) → trim `--num-correct-trials` (higher risk: weakens the fresh-input anti-cheat and still runs the ref once per trial, so keep ≥1 in the loop, full at the gate).
 - **User-provided eval** (custom `{{BENCH_COMMAND}}`): the trial counts, correctness rounds, and reference handling are the **user's contract** — do **not** inject `--no-ref` or cut counts on a script you didn't author (it may have no such flag, break the interface, or silently invalidate the measurement / a leaderboard's required N). Use only the fast-iteration switches the user exposed (flags / env vars documented in the prompt or `HINTS.md`). If iteration is too slow and none exist, **raise it with the user** — don't fabricate one.
 
 Caching the reference's *runtime* across iterations is sound only on a clock-locked GPU; on unlocked clocks (ref and solution timed in different clock states) prefer ranking by the solution's own latency.
@@ -128,7 +128,7 @@ Caching the reference's *runtime* across iterations is sound only on a clock-loc
 
 When 3 consecutive iterations show no improvement (≥3% over current best), pause the loop and re-assess before iter N+1. Re-assessment combines:
 
-- **Re-profile** with `ncu` if available, or re-read runtime stats from `ITERATIONS.md` (min vs mean, distribution shape) if not.
+- **Re-profile** with `ncu` if available, or re-read runtime stats from `ITERATIONS.md` (median vs min/mean, distribution shape) if not.
 - **WebSearch** for op-specific best-known techniques / numbers on the same hardware class.
 - **Review `ITERATIONS.md`** for patterns (which axes have been tried, which haven't, where prior wins came from).
 
@@ -148,7 +148,7 @@ Do not stop silently because tooling is unavailable — that's a re-assessment i
 
 After deciding to stop, leave HEAD at the best-performing iter — not necessarily the latest. Procedure:
 
-1. Identify the best iter by reading `ITERATIONS.md` Summary, the bench output for each iter under `trajectory/`, and your own reasoning notes. Useful signals from KernelBench output: mean speedup, runtime std (consistency), min runtime (tail), `CORRECT` flag. Other bench harnesses expose different shapes — use what's available. Justify your pick in the commit message (e.g., "iter 4: best mean AND lowest min, while iter 6 ties on mean but has higher std").
+1. Identify the best iter by reading `ITERATIONS.md` Summary, the bench output for each iter under `trajectory/`, and your own reasoning notes. Useful signals from KernelBench output: median speedup, runtime std (consistency), min runtime (tail), `CORRECT` flag. Other bench harnesses expose different shapes — use what's available. Justify your pick in the commit message (e.g., "iter 4: best mean AND lowest min, while iter 6 ties on mean but has higher std").
 
 2. If best iter ≠ latest iter:
    - `git checkout <best-iter-sha> -- solution/` — verbatim copy, do NOT hand-reconstruct from memory or earlier notes.
@@ -163,7 +163,7 @@ Probe `ncu` once after baseline. If it fails (driver mismatch, missing toolkit, 
 
 ## Gotchas
 
-- **Pursue genuine latency reduction, not reward hacking.** No CUDA stream injection to evade timing, no monkey-patching the benchmark, no returning uninitialized results. The built-in evaluator flags >10× speedups for a reason — investigate before celebrating.
+- **Pursue genuine latency reduction, not reward hacking.** No CUDA stream injection to evade timing, no monkey-patching the benchmark, no returning uninitialized results. The built-in evaluator flags >10× speedups for a reason — investigate before celebrating. It also re-randomizes the timed inputs in place after timing (mutation sentinel): a solution that keys on input identity and replays a stored output fails outright.
 - **The solution file must not contain `get_inputs` / `get_init_inputs`.** The bench script strips the solution's module-level tail before eval as an anti-cheat boundary. Inputs come from the reference or `--inputs` file, never the solution.
 - **`get_inputs()` must produce fresh data each call.** Bench calls it 5+ times across trials. Module-level cached tensors make correctness checks trivially pass and let timing measure cache-warm performance. Use `torch.randn` or reload from disk on every call.
 - **Don't be lazy.** Stay-in-PyTorch, only-tune-configurations, skip-profiling — these are the default low-effort failure modes for agents. The point of the loop is to *rewrite* the implementation — switch languages (Triton → CUDA, etc.) when it helps.

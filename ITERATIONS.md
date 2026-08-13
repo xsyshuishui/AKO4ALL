@@ -10,8 +10,8 @@ Per-iteration template (copy when adding a new iter entry under "## Iterations")
 - **Bench:**
   - Compiled: True/False
   - Correct: True/False
-  - Runtime: ___ ms (mean), ___ ~ ___ ms (min ~ max)
-  - Speedup: ___x (mean), ___ ~ ___x (min ~ max)
+  - Runtime: ___ ms (median), ___ ~ ___ ms (min ~ max)
+  - Speedup: ___x (median), ___ ~ ___x (min ~ max)
 - **Analysis:** Why it worked or failed
 - **Next:** What to try next
 
@@ -21,7 +21,7 @@ Status values: improved / no-change / regression / failed.
 
 ## Summary
 
-| Iter | Title | Speedup(mean) | Runtime(mean) | Status |
+| Iter | Title | Speedup(median) | Runtime(median) | Status |
 |------|-------|---------|--------------|--------|
 
 ## Iterations

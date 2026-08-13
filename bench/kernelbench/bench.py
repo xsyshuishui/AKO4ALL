@@ -6,6 +6,21 @@ Evaluates an optimized kernel (solution) against a reference kernel.
 Inlines core logic from KernelBench's eval.py and timing.py so no external
 KernelBench dependency is needed.
 
+Measurement protocol (2026-08 upgrade):
+- RUNTIME / REF_RUNTIME report the median over the recorded trials
+  (--num-perf-trials, default 50; first trial discarded; 10 untimed warmups)
+  — robust to the outlier trial a mean folds in. mean/std/min/max stay in
+  the stats dict as context.
+- After the timed trials the reused performance inputs are re-randomized in
+  place and the solution must still track the reference on the new values
+  (mutation sentinel): a solution that keys on input identity and replays a
+  stored output fails instead of timing a cache hit.
+- On CORRECT: False the trailer carries a DEVIATION line stating how far off
+  the output was, so a numerics-tolerance miss and a logic bug are
+  distinguishable from the structured output alone. Emitted only on failure —
+  a margin printed on success would navigate an agent toward the tolerance
+  edge.
+
 Usage:
     python bench/kernelbench/bench.py --ref <ref-path> --solution solution/<kernel> [options]
 
@@ -15,6 +30,7 @@ Output (structured, one per line):
     RUNTIME: <ms>
     REF_RUNTIME: <ms>
     SPEEDUP: <x>
+    DEVIATION: <how wrong>   (only present when CORRECT is False)
 
 Portions of this file are derived from KernelBench
 (https://github.com/ScalingIntelligence/KernelBench).
@@ -74,7 +90,7 @@ def clear_l2_cache(device: torch.device | str = "cuda"):
 def time_execution_with_cuda_event(
     kernel_fn: callable,
     args: list[Any],
-    num_warmup: int = 3,
+    num_warmup: int = 10,
     num_trials: int = 10,
     discard_first: int = 1,
     verbose: bool = True,
@@ -132,7 +148,7 @@ def time_execution_with_cuda_event(
 def time_execution_with_host_time(
     kernel_fn: callable,
     args: list[Any],
-    num_warmup: int = 3,
+    num_warmup: int = 10,
     num_trials: int = 10,
     discard_first: int = 1,
     verbose: bool = True,
@@ -198,11 +214,18 @@ def get_timing_function(method: str = "cuda_event") -> callable:
 
 
 def get_timing_stats(elapsed_times: list[float], device: torch.device = None) -> dict:
-    """Compute mean/std/min/max from a list of elapsed times (ms)."""
+    """Compute median/mean/std/min/max from a list of elapsed times (ms).
+
+    `median` is the reported statistic (see RUNTIME in the module docstring):
+    robust to the outlier trial a mean folds in. The rest stay as context —
+    more recorded facts, one reported number.
+    """
+    median_val = statistics.median(elapsed_times)
     mean_val = statistics.mean(elapsed_times)
     std_val = statistics.stdev(elapsed_times) if len(elapsed_times) > 1 else 0.0
 
     stats = {
+        "median": float(f"{median_val:.3g}"),
         "mean": float(f"{mean_val:.3g}"),
         "std": float(f"{std_val:.3g}"),
         "min": float(f"{min(elapsed_times):.3g}"),
@@ -463,10 +486,10 @@ def run_and_check_correctness(
                     max_diff = torch.max(torch.abs(output - output_new)).item()
                     avg_diff = torch.mean(torch.abs(output - output_new)).item()
                     metadata.setdefault("max_difference", []).append(
-                        f"{max_diff:.6f}"
+                        f"{max_diff:.3e}"
                     )
                     metadata.setdefault("avg_difference", []).append(
-                        f"{avg_diff:.6f}"
+                        f"{avg_diff:.3e}"
                     )
                     metadata["correctness_issue"] = "Output mismatch"
                     if verbose:
@@ -742,8 +765,59 @@ def eval_kernel_against_ref(
 
                 if verbose:
                     print(f"[Eval] Performance Stats: {runtime_stats}")
-                kernel_exec_result.runtime = runtime_stats["mean"]
+                kernel_exec_result.runtime = runtime_stats["median"]
                 kernel_exec_result.runtime_stats = runtime_stats
+
+                # Mutation sentinel (untimed). The timed loop reuses ONE input
+                # tensor for every trial, so a solution can key on tensor
+                # identity and replay a stored output — the timed result then
+                # measures a cache hit, under either timing method.
+                #
+                # The mutation is a full in-place re-randomize of the SAME
+                # tensor objects, deliberately non-affine: normalization-family
+                # tasks are invariant to per-row affine changes (x*a+b shifts
+                # mean/std, output unchanged), so "add a constant" would be a
+                # blind sentinel. It runs AFTER timing, so it costs zero timed
+                # trials and cannot touch the measurement.
+                sentinel_mutated = False
+                with torch.no_grad():
+                    for x in inputs:
+                        if isinstance(x, torch.Tensor) and x.is_floating_point():
+                            x.copy_(torch.randn_like(x))
+                            sentinel_mutated = True
+                if sentinel_mutated:
+                    original_on_device = original_model.to(
+                        device=device, dtype=precision
+                    )
+                    torch.cuda.synchronize(device=device)
+                    with torch.no_grad():
+                        sentinel_new = model_new(*inputs)
+                        sentinel_ref = original_on_device(*inputs)
+                    torch.cuda.synchronize(device=device)
+                    sentinel_tol = get_tolerance_for_precision(precision)
+                    if torch.allclose(
+                        sentinel_ref, sentinel_new,
+                        atol=sentinel_tol, rtol=sentinel_tol,
+                    ):
+                        kernel_exec_result.metadata["mutation_sentinel"] = "pass"
+                        print("MUTATION_SENTINEL: PASS")
+                    else:
+                        diff = (sentinel_ref - sentinel_new).abs()
+                        max_abs = diff.max().item()
+                        avg_abs = diff.mean().item()
+                        kernel_exec_result.correctness = False
+                        kernel_exec_result.metadata["mutation_sentinel"] = "fail"
+                        print(
+                            f"MUTATION_SENTINEL: FAIL max_abs={max_abs:.3e} "
+                            f"avg_abs={avg_abs:.3e}"
+                        )
+                        print(
+                            "[Error] Mutation sentinel: after an in-place change "
+                            "to the performance-phase input, the solution's "
+                            "output no longer tracks the reference. A cached or "
+                            "replayed output cannot follow a mutated input; the "
+                            "timed result does not measure computation."
+                        )
 
         except Exception as e:
             if verbose:
@@ -780,7 +854,7 @@ def eval_kernel_against_ref(
         reference_runtime_stats = get_timing_stats(
             reference_elapsed_times, device=device
         )
-        kernel_exec_result.ref_runtime = reference_runtime_stats["mean"]
+        kernel_exec_result.ref_runtime = reference_runtime_stats["median"]
         kernel_exec_result.ref_runtime_stats = reference_runtime_stats
 
         effective_speedup = (
@@ -1100,7 +1174,7 @@ def main():
     parser.add_argument(
         "--num-perf-trials",
         type=int,
-        default=100,
+        default=50,
         help="Number of performance trials (default: 100)",
     )
     parser.add_argument(
@@ -1206,6 +1280,22 @@ def main():
 
     print(f"COMPILED: {result.compiled}")
     print(f"CORRECT: {result.correctness}")
+    if not result.correctness and result.metadata:
+        # Say HOW wrong, only on failure (module docstring): an agent told
+        # only "wrong" cannot tell a numerics problem (3e-4) from a logic
+        # bug (17), and the two point at opposite fixes.
+        md = result.metadata
+        if md.get("max_difference"):
+            worst = max(float(v) for v in md["max_difference"])
+            avg_part = ""
+            if md.get("avg_difference"):
+                avg_part = f" avg_abs={max(float(v) for v in md['avg_difference']):.3e}"
+            print(
+                f"DEVIATION: max_abs={worst:.3e}{avg_part} "
+                f"failed_trials={len(md['max_difference'])}"
+            )
+        elif md.get("correctness_issue"):
+            print(f"DEVIATION: {md['correctness_issue']}")
     print(f"BACKEND: {args.backend} ({backend_origin})")
     print(f"RUNTIME: {runtime_ms:.4f}" if runtime_ms > 0 else "RUNTIME: -1")
     print(

@@ -240,7 +240,7 @@ Three layers of protection against the agent gaming the metric instead of achiev
 
 1. **Agent rules.** The skill instructs the agent to pursue genuine latency reduction — no CUDA stream injection, no timing manipulation, no returning uninitialized results. Full list in [`SKILL.md`](SKILL.md) "Gotchas".
 
-2. **Evaluator checks** (built-in KernelBench). Flags suspicious >10× speedups for review, and strips any input-generating code (e.g., `get_inputs`) from the solution file before evaluation — so the solution can't choose what it's tested against.
+2. **Evaluator checks** (built-in KernelBench). Flags suspicious >10× speedups for review; strips any input-generating code (e.g., `get_inputs`) from the solution file before evaluation — so the solution can't choose what it's tested against; and, after the timed trials, re-randomizes the reused inputs **in place** and requires the solution to still track the reference (mutation sentinel) — a solution that keys on input identity and replays a stored output fails instead of banking a cache-hit timing. On failure the output carries a `DEVIATION:` line, so a numerics near miss and a gross error are distinguishable.
 
 3. **Stricter enforcement** (optional). Provide a custom bench script with static analysis — e.g., KernelBench's [`kernel_static_checker.py`](https://github.com/ScalingIntelligence/KernelBench) — to reject solutions that contain disallowed patterns before they are even timed.
 
