@@ -11,7 +11,13 @@ Measurement protocol (2026-08 upgrade):
   (--num-perf-trials, default 50; first trial discarded; 10 untimed warmups)
   — robust to the outlier trial a mean folds in. mean/std/min/max stay in
   the stats dict as context.
-- After the timed trials the reused performance inputs are re-randomized in
+- The performance phase defaults to FRESH input values per timed trial
+  (both solution and reference; tensors are built OUTSIDE the timed region):
+  no trial can be served from a value cache keyed on the previous trial's
+  tensors. `--no-fresh-inputs` restores the historical reused regime — the
+  two regimes measure different quantities (cache-warmth meaning changes),
+  so never compare numbers across them.
+- After the timed trials the performance inputs are re-randomized in
   place and the solution must still track the reference on the new values
   (mutation sentinel): a solution that keys on input identity and replays a
   stored output fails instead of timing a cache hit.
@@ -95,10 +101,19 @@ def time_execution_with_cuda_event(
     discard_first: int = 1,
     verbose: bool = True,
     device: torch.device = None,
+    inputs_factory: callable = None,
 ) -> list[float]:
     """
     Time a CUDA kernel over multiple trials using torch.cuda.Event.
     Measures cold-cache performance (L2 thrashed before each trial).
+
+    `inputs_factory`, when given, is called before every timed trial and its
+    return value replaces `args` for that trial — the fresh-values timing
+    regime (`--fresh-inputs`, the default). Construction happens OUTSIDE the
+    event window either way, so the timed region does not move; what changes
+    is that no trial can be served from a value cache keyed on the previous
+    trial's tensors. Warmup keeps the initial `args`: its job is JIT/autotune
+    on the right shapes, and values are irrelevant to it.
 
     Returns list of elapsed times in milliseconds.
     """
@@ -121,6 +136,8 @@ def time_execution_with_cuda_event(
         elapsed_times: list[float] = []
 
         for trial in range(num_trials + discard_first):
+            if inputs_factory is not None:
+                args = inputs_factory()
             torch.cuda.synchronize(device=device)
 
             start_event = torch.cuda.Event(enable_timing=True)
@@ -153,10 +170,14 @@ def time_execution_with_host_time(
     discard_first: int = 1,
     verbose: bool = True,
     device: torch.device | None = None,
+    inputs_factory: callable = None,
 ) -> list[float]:
     """
     Time a CUDA kernel using host-side wall-clock time (perf_counter).
     Includes Python overhead, launch costs, and synchronization.
+
+    `inputs_factory`: same contract as the cuda_event path — fresh args per
+    timed trial, built before the clock reads, warmup on the initial args.
 
     Returns list of elapsed times in milliseconds.
     """
@@ -176,6 +197,8 @@ def time_execution_with_host_time(
     elapsed_times = []
 
     for trial in range(num_trials + discard_first):
+        if inputs_factory is not None:
+            args = inputs_factory()
         torch.cuda.synchronize(device=device)
         clear_l2_cache(device=device)
 
@@ -548,6 +571,7 @@ def eval_kernel_against_ref(
     get_init_inputs_override: Optional[callable] = None,
     ref_path: Optional[str] = None,
     sol_path: Optional[str] = None,
+    fresh_inputs: bool = False,
 ) -> KernelExecResult:
     """
     Evaluate a custom kernel against the reference model.
@@ -574,6 +598,16 @@ def eval_kernel_against_ref(
     backend (exec-based loader); Triton/TileLang/CuTe backends load via
     tempfile so `__file__` already points at a real `.py` (but the tempfile
     path, not the original source).
+
+    `fresh_inputs=True` switches the performance phase to fresh values per
+    timed trial (both solution and reference timing), the
+    `performance_values: "fresh"` regime — the CLI defaults to it; pass
+    --no-fresh-inputs for the historical reused regime. It closes the
+    value-cache seam the reused pool leaves open (a version-guarded cache
+    can time as a hit under reuse while still answering correctly under
+    mutation), at the cost of per-trial input generation walltime and a
+    changed cache-warmth meaning. The timed region itself does not move:
+    factories run outside the event window.
     """
     assert torch.cuda.is_available(), "CUDA is not available, cannot run Eval"
 
@@ -753,6 +787,20 @@ def eval_kernel_against_ref(
                 model_new = custom_model.to(device=device, dtype=precision)
                 torch.cuda.synchronize(device=device)
 
+                # The fresh-values regime: new tensors before every timed
+                # trial, drawn from the seeded stream (deterministic
+                # sequence), built outside the event window. None under the
+                # reused regime — the loop then behaves exactly as it
+                # always has.
+                inputs_factory = None
+                if fresh_inputs:
+                    def inputs_factory():
+                        fresh = get_inputs()
+                        return [
+                            _process_input_tensor(x, device, backend, precision)
+                            for x in fresh
+                        ]
+
                 timing_fn = get_timing_function(timing_method)
                 elapsed_times = timing_fn(
                     model_new,
@@ -760,6 +808,7 @@ def eval_kernel_against_ref(
                     num_trials=num_perf_trials,
                     verbose=verbose,
                     device=device,
+                    inputs_factory=inputs_factory,
                 )
                 runtime_stats = get_timing_stats(elapsed_times, device=device)
 
@@ -843,6 +892,18 @@ def eval_kernel_against_ref(
 
         torch.cuda.synchronize(device=device)
 
+        # Same regime for the denominator as for the numerator: a speedup
+        # whose two sides ran under different input policies would not be a
+        # ratio of like things.
+        reference_factory = None
+        if fresh_inputs:
+            def reference_factory():
+                fresh = get_inputs()
+                return [
+                    _process_input_tensor(x, device, backend, precision)
+                    for x in fresh
+                ]
+
         timing_fn = get_timing_function(timing_method)
         reference_elapsed_times = timing_fn(
             original_model,
@@ -850,6 +911,7 @@ def eval_kernel_against_ref(
             num_trials=num_perf_trials,
             verbose=verbose,
             device=device,
+            inputs_factory=reference_factory,
         )
         reference_runtime_stats = get_timing_stats(
             reference_elapsed_times, device=device
@@ -1168,14 +1230,14 @@ def main():
     parser.add_argument(
         "--num-correct-trials",
         type=int,
-        default=5,
-        help="Number of correctness trials (default: 5)",
+        default=10,
+        help="Number of correctness trials (default: 10)",
     )
     parser.add_argument(
         "--num-perf-trials",
         type=int,
         default=50,
-        help="Number of performance trials (default: 100)",
+        help="Number of performance trials (default: 50)",
     )
     parser.add_argument(
         "--no-ref",
@@ -1185,6 +1247,19 @@ def main():
              "which needs the reference ratio). For fast iteration on an expensive "
              "reference — rank candidates by the solution's own RUNTIME. Omit it "
              "for the full verdict run before committing a winner.",
+    )
+    parser.add_argument(
+        "--fresh-inputs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Performance phase generates fresh input values before every timed "
+             "trial (both solution and reference) instead of reusing one tensor "
+             "set — the performance_values: 'fresh' regime, the default. It "
+             "closes the value-cache seam input reuse leaves open, at the cost "
+             "of per-trial generation walltime and a changed cache-warmth "
+             "meaning; the timed region does not move. --no-fresh-inputs "
+             "restores the historical reused regime (numbers from the two "
+             "regimes are different quantities — never compare across them).",
     )
     parser.add_argument(
         "--verbose", action="store_true", help="Enable verbose output"
@@ -1258,6 +1333,7 @@ def main():
         get_init_inputs_override=get_init_inputs_override,
         ref_path=args.ref,
         sol_path=args.solution,
+        fresh_inputs=args.fresh_inputs,
     )
 
     if result is None:
