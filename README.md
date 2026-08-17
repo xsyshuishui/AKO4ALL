@@ -17,6 +17,7 @@
 
 ## News
 
+- 🔌 **[2026.08.17]** [**dsh-kernel-opt**](https://github.com/xieTwim/dsh-kernel-opt) is open-source — a [DSH](https://github.com/deepseek-ai/deepseek-harness) plugin that makes a kernel-optimization run watchable and steerable live; AKO4ALL's evaluator ships inside it as the built-in default.
 - 📄 **[2026.05.31]** The **[AKO tech report](https://tongminglaic.github.io/AKO/assets/ako-tech-report.pdf)** is now available.
 - 🚀 **[2026.05.31]** [**AKO4X**](https://github.com/TongmingLAIC/AKO4X) is now open-source — the closed-loop, campaign-based system behind our [MLSys 2026 competition](https://mlsys26.flashinfer.ai/) entry.
 - ✨ **[2026.05.31]** **AKO4ALL** is now a single drop-in [Claude Code](https://docs.anthropic.com/en/docs/claude-code) skill — invoke it in any working directory.
